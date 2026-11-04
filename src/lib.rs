@@ -95,7 +95,7 @@ trait Trust {
 /// Returns the well-known name of the client, that has been authenticated.  This means you can
 /// trust that the client is who you think it is.  Returns `None` if no such name can be
 /// authenticated.
-pub async fn authenticated_name(header: Header<'_>) -> Result<OwnedWellKnownName, ErrorKind> {
+pub async fn authenticated_name(header: &Header<'_>) -> Result<OwnedWellKnownName, ErrorKind> {
     let sender = header.sender().ok_or(ErrorKind::NoSender)?;
 
     let connection = Connection::session().await?;
