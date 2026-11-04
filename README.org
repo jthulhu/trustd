@@ -1,0 +1,54 @@
+#+title:trustd
+#+author:jthulhu
+
+~trustd~ exposes the Trust D-Bus API, making it a trust broker.  The goal of the trust broker is
+ - to give a way for user applications to get an authenticated name for other application
+   they're working with
+ - to give a way for user applications to get a unique secret with which they can encrypt their
+   local data
+
+Note that, although ~trustd~ is a per-user service (meaning it is executed in user-space,
+saves its state in the user home, etc), it has to be installed as a system service.  The reasons for this are:
+ - launching or stopping ~trustd~ should not be something accessible by a user application, since
+   doing this would allow a user application to spoof the trust broker
+ - ~trustd~ uses system secrets to encrypt its state, making it impossible for user application to
+   "break in"
+The whole point of the trust broker is specifically that it is the /only/ service that has to be
+run with elevated privileges.
+ 
+* Authenticating applications
+
+When you communicate over D-Bus, there is no "native" way to authenticate whether the application
+you are talking to has some permissions.  There are several ecosystems that rose as ways to
+authenticate requests.  The trust broker is (yet another) such system.  The main shift in
+perspective with the trust broker is that the trust broker gives you an *authenticated* well-known
+name for that application.  What "authenticated" means is left as an implementation detail, and
+as a choice for the system administrator on how to handle.  ~trustd~'s choice is to ensure that the
+binary, as well as its configuration, is the one the administration choiced.  This is implemented
+by ensuring that the cryptographic hash of all of that is the correct one.  Note that this only
+works on NixOS, as ~trustd~ relies heavily on assumptions made on the Nix store.
+
+* Providing per-application secrets
+
+It is our belief that applications should not /just/ rely on system enforcement of proper
+boundaries.  In addition to those, applications should be capable of encrypting their data.  The
+problem of this is that, where should those application find secret keys to encrypt their data?
+The user could provide them all, but it's way too much, and too error prone.  These secrets could
+rely on some secret provider that is unlocked when the user, manually or on login, unlocks it by
+providing a secret.  The problem with this, is that all user applications have access to this.
+Furthermore, if we want to give each application a unique secret, how do we track which
+application has which secrets?
+
+The trust broker solves this problem.  It provides an authentication mechanism for applications,
+giving each application a well-known name that it cannot spoof.  Hence, it also behaves as a
+secret broker: to each application, a secret key is given.  What makes it possible for the trust
+broker to have secrets that are not accessible by other users is that it is started as a system
+service, which has access to system secrets (relying on secure hardware secret storage).
+
+* API
+
+~trustd~ exposes a D-Bus API.  You can use it, but for convenience we recommend using the Rust
+library.  Its usage is extremely simple: if you use ~zbus~, and receive a connection, just pass the
+header, and you'll get back the authenticated well-known name — if one exists.  If you want to
+get a secret, just call ~get_secret~.  The actual authentication happens using kernel primitives
+that are completely transparent to you, as a client.

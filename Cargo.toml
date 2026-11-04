@@ -1,0 +1,35 @@
+[package]
+name = "trustd"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/jthulhu/trustd"
+description = "Trust broker."
+authors = ["jthulhu <jthulhu@2mon.ad>"]
+license = "AGPL-3.0-or-later"
+readme = "README.org"
+
+[dependencies]
+async-trait = "0.1.92"
+clap = { version = "4.6.7", features = ["derive"] }
+futures-util = "0.3.34"
+hex = "0.4.3"
+libsystemd = "0.7.2"
+papaya = "0.2.5"
+rand = "0.10.3"
+serde = "1.0.229"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+toml = "1.1.8"
+trie-rs = "0.4.2"
+xdg = "3.0.0"
+zbus = "6.2.1"
+
+[dependencies.sea-orm]
+version = "2.0.3"
+features = ["sqlx-sqlite", "runtime-tokio", "macros"]
+default-features = false
+
+[dependencies.sea-orm-migration]
+version = "2.0.3"
+features = ["sqlx-sqlite", "runtime-tokio"]
+default-features = false
