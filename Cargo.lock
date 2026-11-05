@@ -1385,6 +1385,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libtrust"
+version = "1.0.0"
+dependencies = [
+ "futures-util",
+ "papaya",
+ "thiserror",
+ "tokio",
+ "zbus",
+ "zbus-trust",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2811,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "trustd"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -2829,6 +2841,7 @@ dependencies = [
  "trie-rs",
  "xdg",
  "zbus",
+ "zbus-trust",
 ]
 
 [[package]]
@@ -3164,6 +3177,13 @@ dependencies = [
  "zbus_utils",
  "zcheapstr",
  "zruntime",
+]
+
+[[package]]
+name = "zbus-trust"
+version = "1.0.0"
+dependencies = [
+ "zbus",
 ]
 
 [[package]]

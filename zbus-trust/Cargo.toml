@@ -1,0 +1,11 @@
+[package]
+name = "zbus-trust"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+
+[dependencies]
+zbus.workspace = true
+

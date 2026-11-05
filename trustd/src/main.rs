@@ -9,9 +9,6 @@ use std::{
 };
 
 use clap::Parser;
-use cli::Cli;
-use config::Config;
-use db::{OpenError, SecretStorage};
 use futures_util::StreamExt;
 use papaya::HashMap as CHashMap;
 use thiserror::Error;
@@ -19,7 +16,6 @@ use trie_rs::{
     Trie as TrieSet, TrieBuilder as TrieSetBuilder,
     map::{Trie as TrieMap, TrieBuilder as TrieMapBuilder},
 };
-use trustd::{AuthenticationError, Secret, SecretError};
 use xdg::BaseDirectories;
 use zbus::{
     Connection, OwnedFd,
@@ -28,6 +24,11 @@ use zbus::{
     message::Header,
     names::{BusName, OwnedUniqueName, OwnedWellKnownName},
 };
+use zbus_trust::{AuthenticationError, Secret, SecretError};
+
+use self::cli::Cli;
+use self::config::Config;
+use self::db::{OpenError, SecretStorage};
 
 mod cli;
 mod config;

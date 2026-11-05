@@ -1,5 +1,5 @@
 use sea_orm::prelude::*;
-use trustd::Secret;
+use zbus_trust::Secret;
 
 #[sea_orm::model]
 #[derive(Debug, Clone, PartialEq, Eq, DeriveEntityModel)]

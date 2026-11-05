@@ -1,0 +1,15 @@
+[package]
+name = "libtrust"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+
+[dependencies]
+zbus.workspace = true
+zbus-trust.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+papaya = "0.2.5"

@@ -9,7 +9,7 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use thiserror::Error;
-use trustd::{Secret, SecretError};
+use zbus_trust::{Secret, SecretError};
 
 mod migrations;
 mod secret;
