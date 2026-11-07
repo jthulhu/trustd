@@ -23,7 +23,7 @@
   outputs = { self, nixpkgs, flake-parts, crane, rust-overlay, advisory-db } @ inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwing" "aarch64-darwin" ];
-      
+
       perSystem = { pkgs, system, lib, ... }:
         let
           rust-toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -44,11 +44,12 @@
             strictDeps = true;
 
             buildInputs = with pkgs; [
-              sqlcipher
+              openssl
             ];
 
             nativeBuildInputs = with pkgs; [
               pkg-config
+              rustPlatform.bindgenHook
             ];
           };
 
@@ -58,13 +59,21 @@
             inherit cargo-artifacts;
             pname = "trustd";
             cargoExtraArgs = "-p trustd";
-            
+
             meta = {
               mainProgram = "trustd";
               homepage = "https://github.com/jthulhu/trust";
               description = "trustd is a trust broker";
             };
           });
+          test-pkg = crane-lib.buildPackage (common-args // {
+            inherit cargo-artifacts;
+            pname = "trustd-tests";
+            cargoExtraArgs = "-p trustd-tests";
+          });
+          testers = {
+            get-secret = lib.getExe' test-pkg "get-secret";
+          };
         in {
           _module.args.pkgs = import nixpkgs {
             inherit system;
@@ -80,19 +89,44 @@
               name = "spin-trustd";
 
               nodes = {
-                wonderland = {
+                wonderland = { pkgs, ... }: {
+
                   imports = [
                     self.nixosModules.default
                   ];
 
+                  services.dbus.implementation = "broker";
+
+                  environment.systemPackages = [
+                    test-pkg
+                    pkgs.sshpass
+                    pkgs.file
+                  ];
+
                   users.users.alice = {
                     password = "lewis";
+                    uid = 1000;
+                    createHome = true;
                     isNormalUser = true;
                   };
 
+                  services.openssh = {
+                    enable = true;
+                    settings = {
+                      StrictModes = false;
+                    };
+                  };
+
+                  services.logind.settings.Login.UserStopDelaySec = "1s";
+
                   services.trustd = {
                     enable = true;
-                    users = [ "alice" ];
+                    policy = {
+                      alice = {
+                        "ad._2mon.test.SecretGetter" = [ testers.get-secret ];
+                        "ad._2mon.test.OtherApp" = [ testers.get-secret ];
+                      };
+                    };
                   };
                 };
               };
@@ -100,13 +134,32 @@
               testScript = ''
                 start_all()
 
-                machine.wait_for_unit("trustd@alice.service")
+                wonderland.wait_for_unit("multi-user.target")
+                wonderland.wait_for_open_port(22)
 
-                machine.succeed("journalctl -u trust@alice.service | grep Starting")
+                wonderland.succeed(
+                    "sshpass -p lewis "
+                    "ssh -tt -F /dev/null -o StrictHostKeyChecking=no alice@localhost "
+                    "</dev/null >/dev/null 2>&1 "
+                    "sleep infinity & echo $! >/tmp/ssh.pid"
+                )
+                wonderland.wait_until_succeeds("systemctl is-active user@1000.service")
+                wonderland.wait_until_succeeds("systemctl is-active trustd@1000.service")
+
+                secret1 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.SecretGetter'")
+                secret2 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.SecretGetter'")
+                secret3 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.OtherApp'")
+
+                assert secret1 == secret2, "getting secrets should be idempotent"
+                assert secret1 != secret3, "different applications should have different secrets"
+
+                wonderland.succeed("pkill -f 'ssh.*alice@'")
+                wonderland.wait_until_succeeds("! systemctl is-active user@1000.service")
+                wonderland.fail("systemctl is-active trustd@1000.service")
               '';
             };
           };
-          
+
           devShells.default = crane-lib.devShell {
             inputsFrom = [ trustd ];
 
@@ -122,98 +175,136 @@
         };
 
       flake = {
-        nixosModules.default = { config, lib, pkgs, ... }:
-          let
-            inherit (lib) mkEnableOption mkOption getExe getExe';
-            inherit (lib.strings) concatMapAttrsStringSep concatMapStringsSep;
-            inherit (pkgs) writeText writeShellScript;
-            service-name = "trustd";
-            full-name = "ad._2mon.${service-name}";
-            cfg = config.services.${service-name};
-            policy-file = writeText 
-              "policy.toml"               
-              (concatMapAttrsStringSep
-                "\n"
-                (app-id: packages:
-                  "${app-id} = [${concatMapStringsSep ", " (pkg: ''"${getExe pkg}"'') packages}]"
-                )
-                cfg.permissions
-              );
+        nixosModules = rec {
+          trust = { config, lib, pkgs, ... }:
+            let
+              inherit (lib) mkEnableOption mkOption getExe getExe';
+              inherit (lib.strings) concatMapAttrsStringSep concatMapStringsSep;
+              inherit (pkgs) writeText writeShellScript;
+              service-name = "trustd";
+              cfg = config.services.${service-name};
+              policy-file = writeText 
+                "policy.toml"               
+                (concatMapAttrsStringSep
+                  "\n"
+                  (user: permissions:
+                    concatMapAttrsStringSep
+                      "\n"
+                      (app-id: packages:
+                        "\"${user}\".\"${app-id}\" = [${concatMapStringsSep ", " (pkg: ''"${if lib.isDerivation pkg then getExe pkg else pkg}"'') packages}]"
+                      )
+                      permissions
+                  )
+                  cfg.policy
+                );
 
-            config-file = writeText
-              "config.toml" 
-              ''
+              config-file = writeText
+                "config.toml" 
+                ''
                 policy_path = "${policy-file}"
               '';
-            
-            gen-secret = writeShellScript "gen-secret" ''
-              if [ ! -f  /etc/credstore.encrypted/trustd-$1-database-key.cred ]; then
+
+              gen-secret = writeShellScript "gen-secret" ''
+              path="/etc/credstore.encrypted/trustd-$1/database-key.cred"
+              if [ ! -f  "$path" ]; then
+                  echo "Generating first-time secret"
+                  mkdir -p "$(dirname "$path")"
                   ${getExe' pkgs.coreutils "head"} -c32 </dev/urandom \
-                      | ${getExe' pkgs.systemd "systemd-creds"} encrypt --name=database-key - /etc/credstore.encrypted/trustd-$1-database-key.cred
+                      | ${getExe' pkgs.systemd "systemd-creds"} encrypt --name=database-key - "$path"
               fi
             '';
-          in {
-            options.services.${service-name} = {
-              enable = mkEnableOption "${service-name} trust broker";
-              users = mkOption {
-                type = with lib.types; listOf str;
-                default = [];
-                description = "Users for which ${service-name} is enabled.";
+            in {
+              options.services.${service-name} = {
+                enable = mkEnableOption "${service-name} trust broker";
+                policy = mkOption {
+                  type = with lib.types; attrsOf (attrsOf (listOf (either package str)));
+                  default = {};
+                  description = "Users for which ${service-name} is enabled.";
+                };
+                package = mkOption {
+                  type = with lib.types; package;
+                  default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+                  description = "The underlying `${service-name}` package to be used.";
+                };
               };
-              permissions = mkOption {
-                type = with lib.types; attrsOf (listOf package);
-                default = {};
-              };
-              package = mkOption {
-                type = with lib.types; package;
-                default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-                description = "The underlying `${service-name}` package to be used.";
-              };
-            };
 
-            config = lib.mkIf cfg.enable {
-              systemd.targets.multi-user.wants = map (user: "${service-name}@${user}.service") cfg.users;
-              systemd.services."${service-name}@" = {
-                description = "A trust broker for %i.";
-                after = [ "local-fs.target" "systemd-user-sessions.service" ];
-                require = [ "local-fs.target" ];
+              config = lib.mkIf cfg.enable {
+                systemd.services = {
+                  # The role of this service is to create a system secret for trustd.
+                  "${service-name}-keygen@" = {
+                    
+                    description = "key generation for ${service-name}@%i.";
 
-                serviceConfig = {
-                  ExecPreStart = "+${gen-secret} %i";
-                  ExecStart = "${lib.getExe cfg.package} -c ${config-file}";
-                  Type = "simple";
+                    serviceConfig = {
+                      Type = "oneshot";
+                      ExecStart = "${gen-secret} \"%i\"";
+                      RemainAfterExit = true;
+                    };
+                  };
 
-                  User = "%i";
-                  Group = "users";
+                  "${service-name}@" = {
+                    description = "trust broker";
+                    after = [
+                      "${service-name}-keygen@%i.service" 
+                      "user@%i.service" # This should only start after `user@%i` has finished setup, ...
+                    ];
+                    # ... it should stop when `user@%i` stops ...
+                    bindsTo = [ "user@%i.service" ];
+                    # ... and it should be started alongside `user@%i`.
+                    # 
+                    # PS: in the [Install] section (which contains `WantedBy`), there is no
+                    # expansion.  Instead, referencing other templates passes the argument over.
+                    wantedBy = [ "user@.service" ];
+                    upheldBy = [ "user@.service" ];
+                    requires = [ "${service-name}-keygen@%i.service" ];
 
-                  LoadCredentialEncrypted = "database-key:/etc/credstore.encrypted/trustd-%i-database-key.cred";
+                    serviceConfig = {
+                      ExecStart = "${lib.getExe cfg.package} -c ${config-file}";
+                      # Considers the service as started when it has claimed its `BusName` over the
+                      # system bus.
+                      Type = "notify";
 
-                  PrivateNetwork = true;
-                  RestrictAddressFamilies = [ "AF_UNIX" ];
-                  ProtectHostname = true;
+                      LoadCredentialEncrypted = [
+                        "database-key:/etc/credstore.encrypted/trustd-%i/database-key.cred" 
+                      ];
 
-                  ProtectSystem = "strict";
-                  ProtectHome = "tmpfs";
+                      User = "%i";
+                      Group = "users";
 
-                  ReadWritePaths = [
-                    "%h/.local/share/${full-name}"
-                    "%h/.config/${full-name}"
-                    "%h/.cache/${full-name}"
-                    "/run/user/%U/bus"
-                  ];
+                      PrivateNetwork = true;
+                      RestrictAddressFamilies = [ "AF_UNIX" ];
+                      ProtectHostname = true;
+                      NoNewPrivileges = true;
 
-                  Environment = [
-                    "XDG_DATA_HOME=%h/.local/share"
-                    "XDG_CONFIG_HOME=%h/.config"
-                    "XDG_CACHE_HOME=%h/.cache"
-                    "DBUS_SESSION_BUS_ADDRESS=unix:path/run/user/%U/bus"
-                  ];
+                      PAMName = "systemd-user";
+                      
+                      ProtectSystem = "strict";
 
-                  PrivateTmp = true;
+                      PrivateTmp = true;
+                    };
+                  };
                 };
               };
             };
+          default = trust;
+          home-manager = { config, ... }: {
+            home-manager.sharedModules = [
+              ({ lib, ... }: 
+                let
+                  inherit (lib) mkOption;
+                in {
+                  options.services.trustd = mkOption {
+                    type = with lib.types; attrsOf (attrsOf (listOf (either package str)));
+                    default = {};
+                  };
+                })
+            ];
+
+            services.trustd.policy = builtins.mapAttrs 
+              (user: cfg: { name = user; key = cfg.services.trustd; })
+              config.home-manager.users;
           };
-      };
+        };
+      }; 
     };
 }

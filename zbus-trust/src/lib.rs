@@ -14,8 +14,18 @@ pub enum AuthenticationError {
     NoWellKnownName,
     CannotCanonicalize(String),
     NotAuthorized,
+    NoSender,
+    NoUid,
+    DBusFdo(String),
+    CannotGetPid(String),
     #[zbus(error)]
     DBus(zbus::Error),
+}
+
+impl From<zbus::fdo::Error> for AuthenticationError {
+    fn from(value: zbus::fdo::Error) -> Self {
+        Self::DBusFdo(value.to_string())
+    }
 }
 
 #[derive(Debug, DBusError)]
@@ -23,6 +33,7 @@ pub enum AuthenticationError {
 pub enum SecretError {
     NoSender,
     NoPidFd,
+    NoUid,
     Transport(String),
     DBusInterface(String),
     Authentication(String),

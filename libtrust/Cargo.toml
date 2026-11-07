@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 repository.workspace = true
+description = "High level library for interacting with the trust broker"
 
 [dependencies]
 zbus.workspace = true

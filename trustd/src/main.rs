@@ -1,17 +1,20 @@
 use std::{
     collections::HashMap,
     error::Error,
-    fs::File,
+    fs::{self, File},
     io::Read,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use clap::Parser;
 use futures_util::StreamExt;
+use libsystemd::daemon::{self, NotifyState};
 use papaya::HashMap as CHashMap;
 use thiserror::Error;
+use toml::from_slice;
 use trie_rs::{
     Trie as TrieSet, TrieBuilder as TrieSetBuilder,
     map::{Trie as TrieMap, TrieBuilder as TrieMapBuilder},
@@ -23,6 +26,7 @@ use zbus::{
     interface,
     message::Header,
     names::{BusName, OwnedUniqueName, OwnedWellKnownName},
+    object_server::SignalEmitter,
 };
 use zbus_trust::{AuthenticationError, Secret, SecretError};
 
@@ -81,7 +85,17 @@ impl TrustBroker {
             buffer
         };
         let mut map_builder = TrieMapBuilder::new();
-        for (name, paths) in toml::from_slice::<HashMap<String, Vec<String>>>(&buffer)? {
+        let mut policies: HashMap<String, HashMap<String, Vec<String>>> = from_slice(&buffer)?;
+        let Some(username) = uzers::get_current_username() else {
+            return Ok(map_builder.build());
+        };
+        let Some(username) = username.to_str() else {
+            return Ok(map_builder.build());
+        };
+        let Some(policy) = policies.remove(username) else {
+            return Ok(map_builder.build());
+        };
+        for (name, paths) in policy {
             let mut builder = TrieSetBuilder::new();
             for path in paths {
                 let path = PathBuf::from(path);
@@ -94,7 +108,24 @@ impl TrustBroker {
     }
 
     async fn mk_name_cache() -> Result<NameCache, NameCacheInitError> {
-        let connection = Connection::session().await?;
+        let connection = {
+            let mut i = 0;
+            let max_retries = 5;
+            loop {
+                i += 1;
+                match Connection::session().await {
+                    Ok(conn) => break conn,
+                    Err(error) if i <= max_retries => {
+                        eprintln!(
+                            "Cannot connect to the D-Bus socket, it might not be ready yet ({i}/{max_retries})"
+                        );
+                        eprintln!("{error}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        };
         let dbus_proxy = DBusProxy::new(&connection).await?;
 
         let name_cache: Arc<CHashMap<_, _>> = Arc::new({
@@ -171,19 +202,12 @@ impl TrustBroker {
 
 #[interface(name = "ad._2mon.Trust")]
 impl TrustBroker {
-    async fn is_authentic(&self, name: String, executable: PathBuf) -> bool {
-        let Some(paths) = self.authorized_paths.exact_match(name) else {
-            return false;
-        };
-        let Ok(executable) = executable.canonicalize() else {
-            return false;
-        };
-        paths.exact_match(executable.as_os_str().as_bytes())
-    }
-
     async fn get_auth_name(
         &self,
         name: OwnedUniqueName,
+        // Note that we ask for a pid fd, instead of a pid, because this makes us immune to pid
+        // recycling: the pid fd is unique, period; furthermore, as long as it's open, the
+        // kernel won't recycle the underlying pid.
         pid_fd: OwnedFd,
     ) -> Result<OwnedWellKnownName, AuthenticationError> {
         let wkn = self
@@ -192,12 +216,28 @@ impl TrustBroker {
             .get(&name)
             .ok_or(AuthenticationError::NoWellKnownName)?
             .to_owned();
-        let path = PathBuf::from(format!("/proc/self/fd/{pid_fd}/exe"))
+
+        let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{pid_fd}"))
+            .map_err(|error| AuthenticationError::CannotGetPid(error.to_string()))?;
+        let pid = fdinfo
+            .lines()
+            .find_map(|line| line.strip_prefix("Pid:"))
+            .and_then(|val| val.trim().parse::<i32>().ok())
+            .ok_or_else(|| {
+                AuthenticationError::CannotGetPid(String::from(
+                    "Pid field missing in /proc/self/fdinfo",
+                ))
+            })?;
+        let file = PathBuf::from(format!("/proc/{pid}/exe"));
+
+        let path = file
             .canonicalize()
             .map_err(|error| AuthenticationError::CannotCanonicalize(error.to_string()))?;
-        let Some(paths) = self.authorized_paths.exact_match(wkn.as_bytes()) else {
-            return Err(AuthenticationError::NotAuthorized);
-        };
+
+        let paths = self
+            .authorized_paths
+            .exact_match(wkn.as_bytes())
+            .ok_or(AuthenticationError::NotAuthorized)?;
         if paths.exact_match(path.as_os_str().as_bytes()) {
             Ok(wkn.into())
         } else {
@@ -205,19 +245,24 @@ impl TrustBroker {
         }
     }
 
-    async fn get_secret(&self, #[zbus(header)] header: Header<'_>) -> Result<Secret, SecretError> {
+    async fn get_secret(
+        &self,
+        #[zbus(connection)] connection: &Connection,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Secret, SecretError> {
         let sender = header.sender().ok_or(SecretError::NoSender)?.to_owned();
-        let connection = Connection::session().await?;
         let dbus_proxy = DBusProxy::new(&connection).await?;
-        let process_fd = dbus_proxy
+        let credentials = dbus_proxy
             .get_connection_credentials(sender.clone().into())
-            .await?
-            .into_process_fd()
-            .ok_or(SecretError::NoPidFd)?;
+            .await?;
+        let process_fd = credentials.into_process_fd().ok_or(SecretError::NoPidFd)?;
         let wkn = self.get_auth_name(sender.into(), process_fd).await?;
         let secret = self.secret_storage.get_secret(wkn.as_str()).await?;
         Ok(secret)
     }
+
+    #[zbus(signal)]
+    async fn clear_cache(&self, _emitter: &SignalEmitter<'_>) -> Result<(), zbus::Error>;
 }
 
 #[tokio::main]
@@ -226,14 +271,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config: config_path,
     } = Cli::parse();
 
+    println!("starting trustd...");
     let config = Config::load(config_path)?;
+    println!("loaded configuration");
     let broker = TrustBroker::new(config).await?;
+    println!("broker instantiated");
 
     let conn = zbus::connection::Builder::session()
         .name("ad._2mon.Trust")
         .serve_at("/ad/_2mon/Trust", broker)
         .build()
         .await?;
+
+    let object_server = conn.object_server();
+    let if_ref = object_server
+        .interface::<_, TrustBroker>("/ad/_2mon/Trust")
+        .await?;
+    if_ref.clear_cache(if_ref.signal_emitter()).await?;
+
+    println!("listening for clients over D-Bus...");
+
+    if daemon::booted() {
+        daemon::notify(false, &[NotifyState::Ready])?;
+    }
 
     conn.closed().await;
 

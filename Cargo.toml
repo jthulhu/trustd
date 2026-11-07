@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["trustd", "libtrust", "zbus-trust"]
+members = ["trustd", "libtrust", "zbus-trust", "tests"]
 
 [workspace.metadata.crane]
 name = "trust"
@@ -13,9 +13,15 @@ license = "AGPL-3.0-or-later"
 version = "1.0.0"
 
 [workspace.dependencies]
-zbus = "6.2.1"
-zbus-trust.path = "zbus-trust"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 futures-util = "0.3.34"
 async-trait = "0.1.92"
+
+zbus-trust = { path = "zbus-trust", version = "1.0.0" }
+libtrust = { path = "libtrust", version = "1.0.0" }
+
+[workspace.dependencies.zbus]
+version = "6.2.1"
+features = ["proxy", "service", "tokio-multithread"]
+default-features = false
