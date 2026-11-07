@@ -1,0 +1,16 @@
+[package]
+name = "trustd-tests"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+description = "Suite of clients used to test trustd."
+# There is no point in publishing this, so let's avoid clubbering crates.io
+publish = false
+
+[dependencies]
+zbus.workspace = true
+libtrust.workspace = true
+tokio.workspace = true
+hex = "0.4.3"

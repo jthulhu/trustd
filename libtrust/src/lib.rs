@@ -79,15 +79,15 @@ pub struct Authenticator {
     /// The cache has to be cleared if the Trust broker restarts, because certain authenticated
     /// names might not be authenticated anymore.
     cache: Arc<NameCache>,
+    connection: Connection,
 }
 
 impl Authenticator {
     /// Creates a new [`Authenticator`] object.
-    pub async fn new() -> Result<Self, NewError> {
+    pub async fn new(connection: Connection) -> Result<Self, NewError> {
         let cache: Arc<NameCache> = Arc::default();
 
         tokio::spawn({
-            let connection = Connection::session().await?;
             let trust_proxy = TrustProxy::new(&connection).await?;
             let mut stream = trust_proxy.receive_clear_cache().await?;
             let cache = cache.clone();
@@ -99,7 +99,7 @@ impl Authenticator {
                 }
             }
         });
-        Ok(Self { cache })
+        Ok(Self { cache, connection })
     }
 
     /// Returns the well-known name of the client, that has been authenticated.  This means you
@@ -116,9 +116,8 @@ impl Authenticator {
             return Ok(wkn.to_owned().into());
         }
 
-        let connection = Connection::session().await?;
-        let dbus_proxy = DBusProxy::new(&connection).await?;
-        let trust_proxy = TrustProxy::new(&connection).await?;
+        let dbus_proxy = DBusProxy::new(&self.connection).await?;
+        let trust_proxy = TrustProxy::new(&self.connection).await?;
 
         let process_fd = dbus_proxy
             .get_connection_credentials(sender.to_owned().into())
@@ -134,7 +133,7 @@ impl Authenticator {
     }
 }
 
-/// Retrieve a unique, persistent 256-bit secret key.
+/// Retrieve a unique, persistent 256-bit secret key.  You need to give a connection to a system
 ///
 /// You will only get a secret if the trust broker is capable of authenticating you.  The
 /// authentication doesn't require you to provide any information, it is based on information
@@ -142,8 +141,7 @@ impl Authenticator {
 ///
 /// The secret is unique per-application, and is persistent, meaning you will always get the same
 /// secret, as long as your authentication doesn't change, even across reboots.
-pub async fn get_secret() -> Result<Secret, SecretError> {
-    let connection = Connection::session().await?;
+pub async fn get_secret(connection: Connection) -> Result<Secret, SecretError> {
     let trust_proxy = TrustProxy::new(&connection).await?;
     let secret = trust_proxy.get_secret().await?;
     Ok(secret)
