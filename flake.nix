@@ -123,8 +123,14 @@
                     enable = true;
                     policy = {
                       alice = {
-                        "ad._2mon.test.SecretGetter" = [ testers.get-secret ];
-                        "ad._2mon.test.OtherApp" = [ testers.get-secret ];
+                        allowed-exe = {
+                          "ad._2mon.test.SecretGetter" = [ testers.get-secret ];
+                          "ad._2mon.test.OtherApp" = [ testers.get-secret ];
+                          "ad._2mon.test.SecretGetter.Backup" = [ testers.get-secret ];
+                        };
+                        on-behalf-of = {
+                          "ad._2mon.test.SecretGetter.Backup" = "ad._2mon.test.SecretGetter";
+                        };
                       };
                     };
                   };
@@ -149,9 +155,11 @@
                 secret1 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.SecretGetter'")
                 secret2 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.SecretGetter'")
                 secret3 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.OtherApp'")
+                secret4 = wonderland.succeed("su - alice -c 'get-secret ad._2mon.test.SecretGetter.Backup'")
 
                 assert secret1 == secret2, "getting secrets should be idempotent"
                 assert secret1 != secret3, "different applications should have different secrets"
+                assert secret1 == secret4, "sub-applications should have the same secrets"
 
                 wonderland.succeed("pkill -f 'ssh.*alice@'")
                 wonderland.wait_until_succeeds("! systemctl is-active user@1000.service")
@@ -175,136 +183,162 @@
         };
 
       flake = {
-        nixosModules = rec {
-          trust = { config, lib, pkgs, ... }:
-            let
-              inherit (lib) mkEnableOption mkOption getExe getExe';
-              inherit (lib.strings) concatMapAttrsStringSep concatMapStringsSep;
-              inherit (pkgs) writeText writeShellScript;
-              service-name = "trustd";
-              cfg = config.services.${service-name};
-              policy-file = writeText 
-                "policy.toml"               
-                (concatMapAttrsStringSep
-                  "\n"
-                  (user: permissions:
-                    concatMapAttrsStringSep
-                      "\n"
-                      (app-id: packages:
-                        "\"${user}\".\"${app-id}\" = [${concatMapStringsSep ", " (pkg: ''"${if lib.isDerivation pkg then getExe pkg else pkg}"'') packages}]"
-                      )
-                      permissions
-                  )
-                  cfg.policy
-                );
-
-              config-file = writeText
-                "config.toml" 
-                ''
-                policy_path = "${policy-file}"
-              '';
-
-              gen-secret = writeShellScript "gen-secret" ''
-              path="/etc/credstore.encrypted/trustd-$1/database-key.cred"
-              if [ ! -f  "$path" ]; then
-                  echo "Generating first-time secret"
-                  mkdir -p "$(dirname "$path")"
-                  ${getExe' pkgs.coreutils "head"} -c32 </dev/urandom \
-                      | ${getExe' pkgs.systemd "systemd-creds"} encrypt --name=database-key - "$path"
-              fi
-            '';
-            in {
-              options.services.${service-name} = {
-                enable = mkEnableOption "${service-name} trust broker";
-                policy = mkOption {
-                  type = with lib.types; attrsOf (attrsOf (listOf (either package str)));
+        nixosModules =
+          let 
+            policy-type = lib: with lib.types; submodule {
+              options = {
+                allowed-exe = lib.mkOption {
+                  type = attrsOf (listOf (either package str));
                   default = {};
-                  description = "Users for which ${service-name} is enabled.";
+                  description = "Allowed executables for a given well-known name.";
                 };
-                package = mkOption {
-                  type = with lib.types; package;
-                  default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-                  description = "The underlying `${service-name}` package to be used.";
-                };
-              };
-
-              config = lib.mkIf cfg.enable {
-                systemd.services = {
-                  # The role of this service is to create a system secret for trustd.
-                  "${service-name}-keygen@" = {
-                    
-                    description = "key generation for ${service-name}@%i.";
-
-                    serviceConfig = {
-                      Type = "oneshot";
-                      ExecStart = "${gen-secret} \"%i\"";
-                      RemainAfterExit = true;
-                    };
-                  };
-
-                  "${service-name}@" = {
-                    description = "trust broker";
-                    after = [
-                      "${service-name}-keygen@%i.service" 
-                      "user@%i.service" # This should only start after `user@%i` has finished setup, ...
-                    ];
-                    # ... it should stop when `user@%i` stops ...
-                    bindsTo = [ "user@%i.service" ];
-                    # ... and it should be started alongside `user@%i`.
-                    # 
-                    # PS: in the [Install] section (which contains `WantedBy`), there is no
-                    # expansion.  Instead, referencing other templates passes the argument over.
-                    wantedBy = [ "user@.service" ];
-                    upheldBy = [ "user@.service" ];
-                    requires = [ "${service-name}-keygen@%i.service" ];
-
-                    serviceConfig = {
-                      ExecStart = "${lib.getExe cfg.package} -c ${config-file}";
-                      # Considers the service as started when it has claimed its `BusName` over the
-                      # system bus.
-                      Type = "notify";
-
-                      LoadCredentialEncrypted = [
-                        "database-key:/etc/credstore.encrypted/trustd-%i/database-key.cred" 
-                      ];
-
-                      User = "%i";
-                      Group = "users";
-
-                      PrivateNetwork = true;
-                      RestrictAddressFamilies = [ "AF_UNIX" ];
-                      ProtectHostname = true;
-                      NoNewPrivileges = true;
-
-                      PAMName = "systemd-user";
-                      
-                      ProtectSystem = "strict";
-
-                      PrivateTmp = true;
-                    };
-                  };
+                on-behalf-of = lib.mkOption {
+                  type = attrsOf str;
+                  default = {};
+                  description = "A map of applications that have access to secrets of other applications.";
                 };
               };
             };
-          default = trust;
-          home-manager = { config, ... }: {
-            home-manager.sharedModules = [
-              ({ lib, ... }: 
-                let
-                  inherit (lib) mkOption;
-                in {
-                  options.services.trustd = mkOption {
-                    type = with lib.types; attrsOf (attrsOf (listOf (either package str)));
-                    default = {};
-                  };
-                })
-            ];
+          in rec {
+            trust = { config, lib, pkgs, ... }:
+              let
+                inherit (lib) mkEnableOption mkOption getExe getExe';
+                inherit (lib.strings) concatMapAttrsStringSep concatMapStringsSep;
+                inherit (pkgs) writeText writeShellScript;
+                service-name = "trustd";
+                cfg = config.services.${service-name};
+                policy-file = writeText
+                  "policy.toml"               
+                  (concatMapAttrsStringSep
+                    "\n"
+                    (user: policies:
+                      "\n[\"${user}\".allowed-exe]\n" +
+                      (concatMapAttrsStringSep
+                        "\n"
+                        (app-id: packages:
+                          "\"${app-id}\" = [${concatMapStringsSep ", " (pkg: ''"${if lib.isDerivation pkg then getExe pkg else pkg}"'') packages}]"
+                        )
+                        policies.allowed-exe
+                      ) +
+                      "\n[\"${user}\".on-behalf-of]\n" +
+                      (concatMapAttrsStringSep
+                        "\n"
+                        (sub-app: super-app:
+                          "\"${sub-app}\" = \"${super-app}\""
+                        )
+                        policies.on-behalf-of
+                      )
+                    )
+                    cfg.policy
+                  );
 
-            services.trustd.policy = builtins.mapAttrs 
-              (user: cfg: cfg.services.trustd)
-              config.home-manager.users;
+                config-file = writeText
+                  "config.toml" 
+                  ''
+                    policy_path = "${policy-file}"
+                  '';
+
+                gen-secret = writeShellScript "gen-secret" ''
+                  path="/etc/credstore.encrypted/trustd-$1/database-key.cred"
+                  if [ ! -f  "$path" ]; then
+                      echo "Generating first-time secret"
+                      mkdir -p "$(dirname "$path")"
+                      ${getExe' pkgs.coreutils "head"} -c32 </dev/urandom \
+                          | ${getExe' pkgs.systemd "systemd-creds"} encrypt --name=database-key - "$path"
+                  fi
+                '';
+              in {
+                options.services.trustd = {
+                  enable = mkEnableOption "${service-name} trust broker";
+                  policy = mkOption {
+                    type = lib.types.attrsOf (policy-type lib);
+                    default = {};
+                    description = "Users for which ${service-name} is enabled.";
+                  };
+                  package = mkOption {
+                    type = with lib.types; package;
+                    default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+                    description = "The underlying `${service-name}` package to be used.";
+                  };
+                };
+
+                config = lib.mkIf cfg.enable {
+                  systemd.services = {
+                    # The role of this service is to create a system secret for trustd.
+                    "${service-name}-keygen@" = {
+                      
+                      description = "key generation for ${service-name}@%i.";
+
+                      serviceConfig = {
+                        Type = "oneshot";
+                        ExecStart = "${gen-secret} \"%i\"";
+                        RemainAfterExit = true;
+                      };
+                    };
+
+                    "${service-name}@" = {
+                      description = "trust broker";
+                      after = [
+                        "${service-name}-keygen@%i.service" 
+                        "user@%i.service" # This should only start after `user@%i` has finished setup, ...
+                      ];
+                      # ... it should stop when `user@%i` stops ...
+                      bindsTo = [ "user@%i.service" ];
+                      # ... and it should be started alongside `user@%i`.
+                      # 
+                      # PS: in the [Install] section (which contains `WantedBy`), there is no
+                      # expansion.  Instead, referencing other templates passes the argument over.
+                      wantedBy = [ "user@.service" ];
+                      upheldBy = [ "user@.service" ];
+                      requires = [ "${service-name}-keygen@%i.service" ];
+
+                      serviceConfig = {
+                        ExecStart = "${lib.getExe cfg.package} -c ${config-file}";
+                        # Considers the service as started when it has claimed its `BusName` over the
+                        # system bus.
+                        Type = "notify";
+
+                        LoadCredentialEncrypted = [
+                          "database-key:/etc/credstore.encrypted/trustd-%i/database-key.cred" 
+                        ];
+
+                        User = "%i";
+                        Group = "users";
+
+                        PrivateNetwork = true;
+                        RestrictAddressFamilies = [ "AF_UNIX" ];
+                        ProtectHostname = true;
+                        NoNewPrivileges = true;
+
+                        PAMName = "systemd-user";
+                        
+                        ProtectSystem = "strict";
+
+                        PrivateTmp = true;
+                      };
+                    };
+                  };
+                };
+              };
+            default = trust;
+            home-manager = { config, ... }: {
+              home-manager.sharedModules = [
+                ({ lib, ... }: 
+                  let
+                    inherit (lib) mkOption;
+                  in {
+                    options.services.trustd = mkOption {
+                      type = policy-type lib;
+                      default = {};
+                    };
+                  })
+              ];
+
+              services.trustd.policy = builtins.mapAttrs
+                (user: cfg: cfg.services.trustd)
+                config.home-manager.users;
+            };
           };
-        };
       }; 
     };
 }

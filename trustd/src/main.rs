@@ -13,6 +13,7 @@ use clap::Parser;
 use futures_util::StreamExt;
 use libsystemd::daemon::{self, NotifyState};
 use papaya::HashMap as CHashMap;
+use serde::Deserialize;
 use thiserror::Error;
 use toml::from_slice;
 use trie_rs::{
@@ -70,41 +71,70 @@ type NameCache = Arc<CHashMap<OwnedUniqueName, OwnedWellKnownName>>;
 
 struct TrustBroker {
     authorized_paths: TrieMap<u8, TrieSet<u8>>,
+    on_behalf_of: TrieMap<u8, String>,
     name_cache: NameCache,
     secret_storage: SecretStorage,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct Policy {
+    allowed_exe: HashMap<Wkn, Vec<String>>,
+    on_behalf_of: HashMap<Wkn, Wkn>,
+}
+type Wkn = String;
+type Username = String;
+type Policies = HashMap<Username, Policy>;
+
 impl TrustBroker {
-    async fn mk_authorized_paths(
+    async fn mk_authorized_paths_and_on_behalf_of(
         policy_path: &Path,
-    ) -> Result<TrieMap<u8, TrieSet<u8>>, AuthorizedPathsError> {
+    ) -> Result<(TrieMap<u8, TrieSet<u8>>, TrieMap<u8, String>), AuthorizedPathsError> {
         let buffer = {
             let mut file = File::open(policy_path)?;
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer)?;
             buffer
         };
-        let mut map_builder = TrieMapBuilder::new();
-        let mut policies: HashMap<String, HashMap<String, Vec<String>>> = from_slice(&buffer)?;
+        let mut authorized_paths_builder = TrieMapBuilder::new();
+        let mut on_behalf_of_builder = TrieMapBuilder::new();
+        let mut policies: Policies = from_slice(&buffer)?;
         let Some(username) = uzers::get_current_username() else {
-            return Ok(map_builder.build());
+            return Ok((
+                authorized_paths_builder.build(),
+                on_behalf_of_builder.build(),
+            ));
         };
         let Some(username) = username.to_str() else {
-            return Ok(map_builder.build());
+            return Ok((
+                authorized_paths_builder.build(),
+                on_behalf_of_builder.build(),
+            ));
         };
         let Some(policy) = policies.remove(username) else {
-            return Ok(map_builder.build());
+            return Ok((
+                authorized_paths_builder.build(),
+                on_behalf_of_builder.build(),
+            ));
         };
-        for (name, paths) in policy {
+        for (name, paths) in policy.allowed_exe {
             let mut builder = TrieSetBuilder::new();
             for path in paths {
                 let path = PathBuf::from(path);
                 let path = path.canonicalize()?;
                 builder.insert(path.as_os_str().as_bytes().iter().copied());
             }
-            map_builder.insert(name.bytes(), builder.build());
+            authorized_paths_builder.insert(name.bytes(), builder.build());
         }
-        Ok(map_builder.build())
+
+        for (source, target) in policy.on_behalf_of {
+            on_behalf_of_builder.insert(source.as_bytes().iter().copied(), target);
+        }
+
+        Ok((
+            authorized_paths_builder.build(),
+            on_behalf_of_builder.build(),
+        ))
     }
 
     async fn mk_name_cache() -> Result<NameCache, NameCacheInitError> {
@@ -182,7 +212,8 @@ impl TrustBroker {
     }
 
     pub async fn new(config: Config) -> Result<Self, TrustInitError> {
-        let authorized_paths = Self::mk_authorized_paths(config.policy_path()).await?;
+        let (authorized_paths, on_behalf_of) =
+            Self::mk_authorized_paths_and_on_behalf_of(config.policy_path()).await?;
 
         // Building the secret storage.
         let base_dirs = BaseDirectories::with_prefix("ad._2mon.trustd");
@@ -194,6 +225,7 @@ impl TrustBroker {
 
         Ok(Self {
             authorized_paths,
+            on_behalf_of,
             name_cache,
             secret_storage,
         })
@@ -257,7 +289,15 @@ impl TrustBroker {
             .await?;
         let process_fd = credentials.into_process_fd().ok_or(SecretError::NoPidFd)?;
         let wkn = self.get_auth_name(sender.into(), process_fd).await?;
-        let secret = self.secret_storage.get_secret(wkn.as_str()).await?;
+        let secret = self
+            .secret_storage
+            .get_secret(
+                self.on_behalf_of
+                    .exact_match(wkn.as_bytes())
+                    .map(String::as_str)
+                    .unwrap_or(wkn.as_str()),
+            )
+            .await?;
         Ok(secret)
     }
 

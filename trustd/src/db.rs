@@ -44,7 +44,6 @@ impl From<GetError> for SecretError {
 impl SecretStorage {
     /// Open a storage, with the actual data residing (encrypted) at `path`.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
-        println!("{}", path.as_ref().display());
         let mut passkey = Vec::new();
         CredentialsLoader::open()?
             .get("database-key")?

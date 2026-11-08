@@ -10,7 +10,7 @@ authors = ["jthulhu <jthulhu@2mon.ad>"]
 edition = "2024"
 repository = "https://github/jthulhu/trust"
 license = "AGPL-3.0-or-later"
-version = "1.0.0"
+version = "1.1.0"
 
 [workspace.dependencies]
 thiserror = "2.0.21"
@@ -18,8 +18,8 @@ tokio = { version = "1.54.1", features = ["full"] }
 futures-util = "0.3.34"
 async-trait = "0.1.92"
 
-zbus-trust = { path = "zbus-trust", version = "1.0.0" }
-libtrust = { path = "libtrust", version = "1.0.0" }
+zbus-trust = { path = "zbus-trust", version = "1.1.0" }
+libtrust = { path = "libtrust", version = "1.1.0" }
 
 [workspace.dependencies.zbus]
 version = "6.2.1"

@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "libtrust"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "futures-util",
  "papaya",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "trustd"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "trustd-tests"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "hex",
  "libtrust",
@@ -3342,7 +3342,7 @@ dependencies = [
 
 [[package]]
 name = "zbus-trust"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "zbus",
 ]
